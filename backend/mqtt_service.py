@@ -1,5 +1,8 @@
+
 import json
 import uuid
+import time
+import threading
 from datetime import datetime
 
 import paho.mqtt.client as mqtt
@@ -9,6 +12,10 @@ BROKER_HOST = "localhost"
 BROKER_PORT = 1883
 
 DEFAULT_DEVICE_ID = "ESP32-001"
+
+# ESP32 sends status every 5 seconds.
+# Mark it offline after 15 seconds without a valid message.
+DEVICE_TIMEOUT_SECONDS = 15
 
 
 class MQTTService:
@@ -27,8 +34,13 @@ class MQTTService:
 
         self.connected = False
 
+        # Latest status received from each ESP32 device.
+        self.device_statuses = {}
+        self.status_lock = threading.Lock()
+
         self.client.on_connect = self._on_connect
         self.client.on_disconnect = self._on_disconnect
+        self.client.on_message = self._on_message
 
         self._connect()
 
@@ -44,7 +56,6 @@ class MQTTService:
                 keepalive=60,
             )
 
-            # Run MQTT network processing in background.
             self.client.loop_start()
 
         except Exception as exc:
@@ -65,11 +76,24 @@ class MQTTService:
                 f"[MQTT] Connected to "
                 f"{self.broker_host}:{self.broker_port}"
             )
+
+            # Listen for status messages from ESP32 devices.
+            result, message_id = client.subscribe(
+                "agrosmart/devices/+/status",
+                qos=0,
+            )
+
+            if result == mqtt.MQTT_ERR_SUCCESS:
+                print("[MQTT] Subscribed to ESP32 status messages")
+            else:
+                print(
+                    f"[MQTT] Status subscription failed: {result}"
+                )
+
         else:
             self.connected = False
             print(
-                f"[MQTT] Connection rejected: "
-                f"{reason_code}"
+                f"[MQTT] Connection rejected: {reason_code}"
             )
 
     def _on_disconnect(
@@ -84,22 +108,117 @@ class MQTTService:
         print("[MQTT] Disconnected")
 
     # ---------------------------------------------------------
+    # RECEIVE ESP32 STATUS
+    # ---------------------------------------------------------
+
+    def _on_message(self, client, userdata, message):
+        prefix = "agrosmart/devices/"
+        suffix = "/status"
+
+        topic = message.topic
+
+        if not topic.startswith(prefix) or not topic.endswith(suffix):
+            return
+
+        device_id = topic[len(prefix):-len(suffix)]
+
+        if not device_id:
+            return
+
+        try:
+            payload = json.loads(message.payload.decode("utf-8"))
+
+            if not isinstance(payload, dict):
+                raise ValueError("Status payload must be a JSON object")
+
+            # Only accept a status message that identifies the
+            # same device as the MQTT topic.
+            payload_device_id = payload.get("device_id")
+
+            if payload_device_id != device_id:
+                print(
+                    f"[MQTT] Ignored mismatched device ID on {topic}"
+                )
+                return
+
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            print(f"[MQTT] Invalid status message on {topic}: {exc}")
+            return
+
+        received_at = datetime.now().astimezone().isoformat(
+            timespec="seconds"
+        )
+
+        with self.status_lock:
+            self.device_statuses[device_id] = {
+                "payload": payload,
+                "last_seen": received_at,
+                "last_seen_monotonic": time.monotonic(),
+            }
+
+        print(f"[MQTT] Status received from {device_id}")
+
+    # ---------------------------------------------------------
     # DEVICE TOPICS
     # ---------------------------------------------------------
 
     @staticmethod
     def command_topic(device_id: str) -> str:
-        return (
-            f"agrosmart/devices/"
-            f"{device_id}/command"
-        )
+        return f"agrosmart/devices/{device_id}/command"
 
     @staticmethod
     def status_topic(device_id: str) -> str:
-        return (
-            f"agrosmart/devices/"
-            f"{device_id}/status"
+        return f"agrosmart/devices/{device_id}/status"
+
+    # ---------------------------------------------------------
+    # DEVICE STATUS / ONLINE CHECK
+    # ---------------------------------------------------------
+
+    def get_device_status(
+        self,
+        device_id: str = DEFAULT_DEVICE_ID,
+    ) -> dict:
+        with self.status_lock:
+            record = self.device_statuses.get(device_id)
+
+            if record is None:
+                return {
+                    "device_id": device_id,
+                    "status": "UNKNOWN",
+                    "last_seen": None,
+                    "age_seconds": None,
+                    "details": None,
+                    "message": "No valid status message received yet.",
+                }
+
+            # Copy values while holding the lock.
+            payload = dict(record["payload"])
+            last_seen = record["last_seen"]
+            last_seen_monotonic = record["last_seen_monotonic"]
+
+        age_seconds = max(
+            0,
+            round(time.monotonic() - last_seen_monotonic, 1),
         )
+
+        device_state = (
+            "ONLINE"
+            if age_seconds <= DEVICE_TIMEOUT_SECONDS
+            else "OFFLINE"
+        )
+
+        return {
+            "device_id": device_id,
+            "status": device_state,
+            "last_seen": last_seen,
+            "age_seconds": age_seconds,
+            "details": payload,
+            "message": (
+                "Recent ESP32 status received."
+                if device_state == "ONLINE"
+                else "ESP32 status message is stale."
+            ),
+        }
 
     # ---------------------------------------------------------
     # PUBLISH SPRAY COMMAND
@@ -146,12 +265,7 @@ class MQTTService:
 
         print("\n[MQTT] SPRAY COMMAND PUBLISHED")
         print(f"Topic   : {topic}")
-        print(
-            json.dumps(
-                payload,
-                indent=2,
-            )
-        )
+        print(json.dumps(payload, indent=2))
 
         return {
             "published": True,
@@ -170,6 +284,11 @@ class MQTTService:
             "connected": self.connected,
             "broker": self.broker_host,
             "port": self.broker_port,
+            "devices": {
+                DEFAULT_DEVICE_ID: self.get_device_status(
+                    DEFAULT_DEVICE_ID
+                )
+            },
         }
 
 

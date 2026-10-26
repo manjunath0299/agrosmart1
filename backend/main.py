@@ -609,20 +609,37 @@ def spray(
     # path so the simulated ESP32 can be tested safely.
     # ----------------------------------------------------------
 
-    if treatment.get(
-        "execution_enabled"
-    ) is not True:
+    
+    if treatment.get("execution_enabled") is not True:
+        try:
+            mqtt_result = mqtt_service.publish_spray_command(
+                device_id=device_id,
+                bottle=int(treatment["bottle"]),
+                target_volume_ml=float(treatment["amount_ml"]),
+            )
+        except Exception as exc:
+            return {
+                "success": False,
+                "status": "SIMULATION_MQTT_ERROR",
+                "executed": False,
+                "device_id": device_id,
+                "treatment": treatment,
+                "message": (
+                    f"Simulation command could not be published: {exc}"
+                ),
+            }
 
         return {
             "success": True,
-            "status": "SIMULATION_ONLY",
+            "status": "SIMULATION_COMMAND_SENT",
             "executed": False,
             "device_id": device_id,
+            "command": mqtt_result,
             "treatment": treatment,
             "message": (
-                "Treatment is configured for "
-                "demonstration only. Physical spray "
-                "execution is disabled."
+                "Simulation command published to MQTT. "
+                "Physical spraying remains disabled; "
+                "device receipt is not yet confirmed."
             ),
         }
 

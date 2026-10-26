@@ -1,0 +1,359 @@
+
+import { useEffect, useState } from "react";
+import {
+  Activity,
+  Clock3,
+  Cpu,
+  Droplets,
+  ShieldCheck,
+  Wifi,
+} from "lucide-react";
+import {
+  CartesianGrid,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
+
+const MAX_HISTORY = 20;
+
+function MetricCard({ icon: Icon, label, value, detail, tone = "emerald" }) {
+  const tones = {
+    emerald: "text-emerald-400",
+    amber: "text-amber-400",
+    sky: "text-sky-400",
+    slate: "text-slate-300",
+  };
+
+  return (
+    <div className="rounded-2xl border border-white/5 bg-white/[0.02] p-5">
+      <div className="flex items-center justify-between">
+        <p className="text-sm text-slate-400">{label}</p>
+        <Icon size={19} className={tones[tone] || tones.emerald} />
+      </div>
+      <p className="mt-4 break-words text-2xl font-bold">{value}</p>
+      <p className="mt-2 text-xs leading-relaxed text-slate-500">{detail}</p>
+    </div>
+  );
+}
+
+function formatUptime(seconds) {
+  if (seconds == null || !Number.isFinite(Number(seconds))) {
+    return "Unavailable";
+  }
+
+  const total = Math.max(0, Math.floor(Number(seconds)));
+  const days = Math.floor(total / 86400);
+  const hours = Math.floor((total % 86400) / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+
+  return `${days}d ${hours}h ${minutes}m`;
+}
+
+function formatAge(seconds) {
+  if (seconds == null || !Number.isFinite(Number(seconds))) {
+    return "Unavailable";
+  }
+
+  return `${Math.max(0, Number(seconds))} seconds ago`;
+}
+
+export default function AnalyticsPage({
+  deviceId,
+  deviceStatus,
+  brokerConnected,
+  deviceDetails,
+  lastSeen,
+  ageSeconds,
+}) {
+  const [flowHistory, setFlowHistory] = useState([]);
+
+  const flowRate = deviceDetails?.flow_rate_lpm;
+  const waterUsed = deviceDetails?.flow_litres;
+  const uptime = deviceDetails?.uptime_seconds;
+  const relayEnabled = deviceDetails?.relay_outputs_enabled === true;
+  const irrigationActive = deviceDetails?.irrigation_active;
+
+  const telemetryAge = Number(ageSeconds);
+
+  const telemetryFresh =
+    deviceStatus === "ONLINE" &&
+    ageSeconds != null &&
+    Number.isFinite(telemetryAge) &&
+    telemetryAge >= 0 &&
+    telemetryAge <= 15;
+
+  const telemetryDelayed =
+    deviceStatus === "ONLINE" &&
+    ageSeconds != null &&
+    Number.isFinite(telemetryAge) &&
+    telemetryAge > 15;
+
+  const telemetryUnavailable =
+    ageSeconds == null ||
+    !Number.isFinite(telemetryAge) ||
+    telemetryAge < 0;
+
+  const validFlow =
+    flowRate != null &&
+    Number.isFinite(Number(flowRate)) &&
+    Number(flowRate) >= 0;
+
+  // Record a point only when a new device status timestamp arrives.
+  // Record a point for each distinct device status timestamp.
+  // Store each distinct, valid ESP32 flow reading.
+  useEffect(() => {
+    if (!lastSeen || deviceStatus !== "ONLINE" || !validFlow) {
+      return;
+    }
+
+    const timestamp = new Date(lastSeen).getTime();
+
+    if (!Number.isFinite(timestamp)) {
+      return;
+    }
+
+    setFlowHistory((previous) => {
+      if (previous.some((point) => point.timestamp === timestamp)) {
+        return previous;
+      }
+
+      return [
+        ...previous,
+        {
+          timestamp,
+          time: new Date(timestamp).toLocaleTimeString(),
+          flow: Number(flowRate),
+        },
+      ]
+        .sort((a, b) => a.timestamp - b.timestamp)
+        .slice(-MAX_HISTORY);
+    });
+  }, [lastSeen, deviceStatus, validFlow, flowRate]);
+
+  const flowValue = validFlow
+    ? `${Number(flowRate).toFixed(2)} L/min`
+    : "Unavailable";
+
+  const waterValue =
+    waterUsed != null &&
+    Number.isFinite(Number(waterUsed)) &&
+    Number(waterUsed) >= 0
+      ? `${Number(waterUsed).toFixed(2)} L`
+      : "Unavailable";
+
+  return (
+    <section className="mt-6 space-y-6">
+      <div>
+        <p className="text-xs font-semibold uppercase tracking-widest text-emerald-400">
+          Device monitoring
+        </p>
+        <h2 className="mt-2 text-2xl font-bold">AgroSmart Analytics</h2>
+        <p className="mt-2 text-sm text-slate-400">
+          Live device telemetry. Missing measurements are shown as unavailable,
+          not assumed to be zero.
+        </p>
+      </div>
+
+      <div
+        className={`rounded-2xl border p-4 ${
+          telemetryFresh
+            ? "border-emerald-500/20 bg-emerald-500/5"
+            : "border-amber-500/20 bg-amber-500/5"
+        }`}
+      >
+        <div className="flex items-start gap-3">
+          <Activity
+            size={20}
+            className={
+              telemetryFresh ? "text-emerald-400" : "text-amber-400"
+            }
+          />
+          <div>
+            <h3 className="font-semibold">
+              {telemetryFresh
+                ? "Telemetry is fresh"
+                : telemetryUnavailable
+                  ? "Telemetry age unavailable"
+                  : telemetryDelayed
+                    ? "Telemetry is delayed"
+                    : "Device is not online"}
+            </h3>
+            <p className="mt-1 text-sm text-slate-400">
+              {telemetryFresh
+                ? `Last device update was ${telemetryAge.toFixed(1)} seconds ago.`
+                : telemetryUnavailable
+                  ? "The last-update age is missing or invalid. Live data cannot be confirmed."
+                  : telemetryDelayed
+                    ? `The last update was ${telemetryAge.toFixed(1)} seconds ago. Check device connectivity.`
+                    : "The backend does not currently report the device as online."}
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+        <MetricCard
+          icon={Cpu}
+          label="ESP32 Status"
+          value={deviceStatus || "UNKNOWN"}
+          detail={`Device ID: ${deviceId}`}
+          tone={deviceStatus === "ONLINE" ? "emerald" : "amber"}
+        />
+
+        <MetricCard
+          icon={Wifi}
+          label="MQTT Broker"
+          value={brokerConnected ? "Connected" : "Disconnected"}
+          detail="Backend-reported broker state"
+          tone={brokerConnected ? "emerald" : "amber"}
+        />
+
+        <MetricCard
+          icon={Clock3}
+          label="Device Uptime"
+          value={formatUptime(uptime)}
+          detail="Time reported since the device started"
+          tone="sky"
+        />
+
+        <MetricCard
+          icon={Activity}
+          label="Last Status Message"
+          value={formatAge(ageSeconds)}
+          detail={
+            lastSeen
+              ? `Timestamp: ${new Date(lastSeen).toLocaleString()}`
+              : "No timestamp available"
+          }
+          tone="slate"
+        />
+
+        <MetricCard
+          icon={Droplets}
+          label="Dispensing Flow Rate"
+          value={flowValue}
+          detail="ESP32 telemetry; not browser simulation"
+          tone="sky"
+        />
+
+        <MetricCard
+          icon={Droplets}
+          label="Reported Liquid Dispensed"
+          value={waterValue}
+          detail="Cumulative value reported by the ESP32, if available"
+          tone="sky"
+        />
+      </div>
+
+      <div className="rounded-2xl border border-white/5 bg-white/[0.02] p-5">
+        <div className="mb-4">
+          <h3 className="font-semibold">Dispensing Flow History</h3>
+          
+          <p className="mt-1 text-xs text-slate-500">
+            Up to 20 distinct device status readings; history is held in browser
+            memory and resets when this page component is reloaded.
+          </p>
+        </div>
+
+{flowHistory.length === 0 ? (             
+     <div className="flex min-h-48 items-center justify-center rounded-xl border border-dashed border-white/10 px-5 text-center">
+            <p className="max-w-md text-sm leading-relaxed text-slate-400">
+  Waiting for the first valid flow reading from an online ESP32.
+</p>
+          </div>
+        ) : (
+          <div className="h-64 w-full min-w-0">
+  <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={200}>
+              <LineChart
+                data={flowHistory}
+                margin={{ top: 10, right: 18, left: 0, bottom: 4 }}
+              >
+                <CartesianGrid stroke="#334155" strokeDasharray="3 3" />
+                <XAxis
+                  dataKey="time"
+                  tick={{ fill: "#94a3b8", fontSize: 11 }}
+                  minTickGap={24}
+                />
+                <YAxis
+                  width={64}
+                  tick={{ fill: "#94a3b8", fontSize: 11 }}
+                  label={{
+                    value: "L/min",
+                    angle: -90,
+                    position: "insideLeft",
+                    fill: "#94a3b8",
+                  }}
+                  domain={[0, "auto"]}
+                />
+                <Tooltip
+                  contentStyle={{
+                    background: "#08130f",
+                    border: "1px solid #334155",
+                    borderRadius: 12,
+                  }}
+                  formatter={(value) => [
+                    `${Number(value).toFixed(2)} L/min`,
+                    "Reported dispensing flow",
+                  ]}
+                />
+                <Line
+                  type="monotone"
+                  dataKey="flow"
+                  name="Reported dispensing flow"
+                  stroke="#34d399"
+                  strokeWidth={2}
+                  dot={{ r: 3, fill: "#34d399" }}
+                  activeDot={{ r: 5 }}
+                  isAnimationActive={false}
+                />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+      </div>
+
+      <div className="rounded-2xl border border-amber-500/20 bg-amber-500/5 p-5">
+        <div className="flex items-start gap-3">
+          <ShieldCheck size={21} className="mt-0.5 shrink-0 text-amber-400" />
+          <div>
+            <h3 className="font-semibold text-amber-300">Hardware safety</h3>
+            <p className="mt-2 text-sm text-slate-300">
+              Relay outputs reported by device:{" "}
+              <strong>
+                {relayEnabled
+                  ? "Enabled — verify hardware safety"
+                  : "Disabled or not confirmed enabled"}
+              </strong>
+            </p>
+            <p className="mt-1 text-sm text-slate-400">
+              Pump/dispensing status reported by device:{" "}
+              <strong>
+                {irrigationActive == null
+                  ? "Unknown"
+                  : irrigationActive
+                    ? "Active"
+                    : "Inactive"}
+              </strong>
+            </p>
+            <p className="mt-2 text-xs leading-relaxed text-slate-500">
+              Monitoring only. This page does not control pumps. Keep the
+              hardware safety configuration unchanged.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div className="rounded-2xl border border-white/5 bg-white/[0.02] p-5">
+        <h3 className="font-semibold">Simulation data is separate</h3>
+        <p className="mt-2 text-sm leading-relaxed text-slate-400">
+          The Pump Simulation page uses browser-only simulation values. They are
+          not included in this live telemetry chart.
+        </p>
+      </div>
+    </section>
+  );
+}

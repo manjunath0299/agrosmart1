@@ -1,4 +1,6 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import DevicesPage from "./components/DevicesPage";
+import AnalyticsPage from "./components/AnalyticsPage";
 import {
   Activity,
   AlertCircle,
@@ -29,19 +31,24 @@ import { motion } from "framer-motion";
 import {
   analyzeLeaf,
   approveSpray,
+  getMqttHealth,
 } from "./services/api";
-
 // ============================================================
 // CONFIGURATION
 // ============================================================
 
 const DEVICE_ID = "ESP32-001";
+const MQTT_REFRESH_INTERVAL = 3000;
 
 const navigation = [
   {
     name: "AI Analysis",
     icon: Activity,
   },
+ {
+  name: "Irrigation",
+  icon: Droplets,
+},
   {
     name: "Treatments",
     icon: Syringe,
@@ -94,6 +101,21 @@ function formatDiseaseName(name) {
     .replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
+function getRecommendedPump(crop) {
+  if (!crop) return null;
+
+  const normalizedCrop = crop.toLowerCase().trim();
+
+  if (normalizedCrop.includes("tomato")) return 1;
+  if (normalizedCrop.includes("potato")) return 2;
+  if (normalizedCrop.includes("apple")) return 3;
+  if (
+  normalizedCrop.includes("maize") ||
+  normalizedCrop.includes("corn")
+) return 4;
+
+  return null;
+}
 
 function getSeverityClass(level) {
   switch (level) {
@@ -211,6 +233,53 @@ function SeverityGauge({ severity, level }) {
 // ============================================================
 
 export default function App() {
+  const [mqttHealth, setMqttHealth] = useState(null);
+  useEffect(() => {
+    let isMounted = true;
+
+    const refreshMqttHealth = async () => {
+      try {
+        const data = await getMqttHealth();
+
+        if (isMounted) {
+          setMqttHealth(data);
+        }
+      } catch (error) {
+        if (isMounted) {
+          setMqttHealth(null);
+        }
+        console.error("Failed to fetch MQTT health:", error);
+      }
+    };
+
+    refreshMqttHealth();
+
+    const intervalId = setInterval(
+      refreshMqttHealth,
+      MQTT_REFRESH_INTERVAL
+    );
+
+    return () => {
+      isMounted = false;
+      clearInterval(intervalId);
+    };
+  }, []);
+
+  const deviceStatus =
+    mqttHealth?.devices?.[DEVICE_ID]?.status ?? "UNKNOWN";
+  const brokerConnected = mqttHealth?.connected === true;
+  const deviceDetails = mqttHealth?.devices?.[DEVICE_ID]?.details;
+const deviceLastSeen =
+  mqttHealth?.devices?.[DEVICE_ID]?.last_seen ?? null;
+
+const relayOutputsEnabled =
+  deviceDetails?.relay_outputs_enabled === true;
+  const deviceStatusClass =
+    deviceStatus === "ONLINE"
+      ? "text-emerald-400"
+      : deviceStatus === "OFFLINE"
+        ? "text-red-400"
+        : "text-amber-400";
 
   const fileInputRef = useRef(null);
 
@@ -223,7 +292,66 @@ export default function App() {
 
   const [mobileMenuOpen, setMobileMenuOpen] =
     useState(false);
+// ----------------------------------------------------------
+// IRRIGATION SIMULATION — BROWSER ONLY
+// No MQTT commands or hardware control.
+// ----------------------------------------------------------
 
+const [irrigationZones, setIrrigationZones] = useState(
+  [
+    { id: 1, name: "Zone 1", crop: "Tomato", running: false, litres: 0 },
+    { id: 2, name: "Zone 2", crop: "Potato", running: false, litres: 0 },
+    { id: 3, name: "Zone 3", crop: "apple", running: false, litres: 0 },
+    { id: 4, name: "Zone 4", crop: "Maize", running: false, litres: 0 },
+  ]
+);
+
+/*const getRecommendedPump = (crop) => {
+  const normalizedCrop = crop?.toLowerCase().trim();
+
+  const cropToPump = {
+    tomato: 1,
+    potato: 2,
+    chilli: 3,
+    maize: 4,
+  };
+
+  return cropToPump[normalizedCrop] ?? null;
+};*/
+
+const [irrigationFlowRate, setIrrigationFlowRate] = useState(2.5);
+
+const toggleIrrigationZone = (zoneId) => {
+  setIrrigationZones((zones) =>
+    zones.map((zone) =>
+      zone.id === zoneId
+        ? { ...zone, running: !zone.running }
+        : zone
+    )
+  );
+};
+
+const stopAllIrrigationZones = () => {
+  setIrrigationZones((zones) =>
+    zones.map((zone) => ({ ...zone, running: false }))
+  );
+};
+useEffect(() => {
+  const intervalId = setInterval(() => {
+    setIrrigationZones((zones) =>
+      zones.map((zone) =>
+        zone.running
+          ? {
+              ...zone,
+              litres: zone.litres + irrigationFlowRate / 60,
+            }
+          : zone
+      )
+    );
+  }, 1000);
+
+  return () => clearInterval(intervalId);
+}, [irrigationFlowRate]);
   // ----------------------------------------------------------
   // IMAGE STATE
   // ----------------------------------------------------------
@@ -491,6 +619,16 @@ export default function App() {
   const disease =
     analysisResult?.disease;
 
+  const recommendedPump = getRecommendedPump(disease?.crop);
+  const recommendationEligible =
+  disease?.status === "PREDICTION_ACCEPTED" &&
+  Number.isFinite(Number(disease?.confidence)) &&
+  disease?.confidence !== null &&
+  disease?.confidence !== undefined &&
+  getRecommendedPump(disease?.crop) !== null;
+console.log("AI disease result:", analysisResult?.disease);
+console.log("AI detected crop:", disease?.crop);
+console.log("Recommended pump:", recommendedPump);
   const severity =
     analysisResult?.severity;
 
@@ -674,11 +812,17 @@ export default function App() {
 
                 </div>
 
-                <span className="flex items-center gap-1.5 text-[10px] text-emerald-400">
+                <span className={`flex items-center gap-1.5 text-[10px] ${deviceStatusClass}`}>
 
-                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                  <span className={`h-1.5 w-1.5 rounded-full ${
+                    deviceStatus === "ONLINE"
+                      ? "bg-emerald-400"
+                      : deviceStatus === "OFFLINE"
+                        ? "bg-red-400"
+                        : "bg-amber-400"
+                  }`} />
 
-                  ONLINE
+                  {deviceStatus}
 
                 </span>
 
@@ -689,7 +833,7 @@ export default function App() {
               </div>
 
               <div className="mt-1 text-[11px] text-slate-500">
-                MQTT Connected
+                MQTT {brokerConnected ? "Connected" : "Disconnected"}
               </div>
 
             </div>
@@ -771,7 +915,32 @@ export default function App() {
             </div>
 
           </div>
+{/* ANALYTICS PAGE */}
+{activePage === "Analytics" && (
+  <AnalyticsPage
+    deviceId={DEVICE_ID}
+    deviceStatus={deviceStatus}
+    brokerConnected={brokerConnected}
+    deviceDetails={deviceDetails}
+    lastSeen={mqttHealth?.devices?.[DEVICE_ID]?.last_seen}
+    ageSeconds={mqttHealth?.devices?.[DEVICE_ID]?.age_seconds}
+  />
+)}
 
+
+{/* DEVICES PAGE */}
+{activePage === "Devices" && (
+  <DevicesPage
+    deviceId={DEVICE_ID}
+    deviceStatus={deviceStatus}
+    brokerConnected={brokerConnected}
+    deviceDetails={deviceDetails}
+    lastSeen={mqttHealth?.devices?.[DEVICE_ID]?.last_seen}
+    ageSeconds={mqttHealth?.devices?.[DEVICE_ID]?.age_seconds}
+  />
+)}
+{activePage === "AI Analysis" && (
+  <>
 
           {/* ==================================================
               ERROR
@@ -1060,29 +1229,43 @@ export default function App() {
 
                 {[
                   {
-                    icon: Cpu,
-                    label: "ESP32 Controller",
-                    value: DEVICE_ID,
-                    status: "ONLINE",
-                  },
+  icon: Cpu,
+  label: "ESP32 Controller",
+  value: deviceLastSeen
+    ? `Last seen: ${new Date(deviceLastSeen).toLocaleString()}`
+    : `Device ID: ${DEVICE_ID} — last seen unavailable`,
+  status: deviceStatus,
+},
                   {
                     icon: Wifi,
                     label: "MQTT Broker",
                     value: "localhost:1883",
-                    status: "CONNECTED",
+                    status: brokerConnected ? "CONNECTED" : "DISCONNECTED",
                   },
                   {
                     icon: Droplets,
                     label: "Flow Sensor",
-                    value: "Ready",
-                    status: "READY",
+                    value: `Reported flow: ${
+  deviceDetails?.flow_rate_lpm != null
+    ? `${deviceDetails.flow_rate_lpm} L/min`
+    : "Unavailable"
+}`,
+                    status: deviceDetails ? "TELEMETRY" : "UNKNOWN",
                   },
                   {
-                    icon: Syringe,
-                    label: "Spray System",
-                    value: "Simulation",
-                    status: "SAFE",
-                  },
+  icon: ShieldCheck,
+  label: "Relay Outputs",
+  value: relayOutputsEnabled
+    ? "Enabled — verify hardware safety"
+    : "Disabled — hardware outputs inactive",
+  status: relayOutputsEnabled ? "ENABLED" : "DISABLED",
+},
+{
+  icon: Syringe,
+  label: "Spray System",
+  value: "Simulation only",
+  status: "SAFE",
+},
                 ].map((item) => {
 
                   const Icon = item.icon;
@@ -1118,7 +1301,13 @@ export default function App() {
 
                       </div>
 
-                      <span className="text-[10px] font-semibold tracking-wide text-emerald-400">
+                      <span className={`text-[10px] font-semibold tracking-wide ${
+                        ["ONLINE", "CONNECTED", "SAFE", "TELEMETRY"].includes(item.status)
+                          ? "text-emerald-400"
+                          : ["OFFLINE", "DISCONNECTED"].includes(item.status)
+                            ? "text-red-400"
+                            : "text-amber-400"
+                      }`}>
                         {item.status}
                       </span>
 
@@ -1740,6 +1929,259 @@ export default function App() {
             </motion.section>
           )}
 
+{/* ==================================================
+    IRRIGATION SIMULATION PAGE — BROWSER ONLY
+================================================== */}
+
+{activePage === "Irrigation" && (
+  <motion.section
+    initial={{ opacity: 0, y: 12 }}
+    animate={{ opacity: 1, y: 0 }}
+    className="mt-6 space-y-6"
+  >
+    {/* Safety banner */}
+    <div className="rounded-2xl border border-amber-500/20 bg-amber-500/5 p-5">
+      <div className="flex items-start gap-3">
+        <ShieldCheck className="mt-1 shrink-0 text-amber-400" size={22} />
+        <div>
+         <h2 className="font-semibold text-amber-300">
+  Nutrient Pump Simulation Only — Hardware Disabled
+</h2>
+
+<p className="mt-1 text-sm leading-relaxed text-slate-400">
+  Four independent software-only pump simulations.
+  Flow rate and liquid consumption are estimated demo
+  values, not physical sensor readings. No MQTT pump
+  commands are sent, and no physical pump, valve, or
+  relay is controlled.
+</p>
+        </div>
+      </div>
+    </div>
+
+    {/* Summary cards */}
+    <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="rounded-2xl border border-white/5 bg-white/[0.02] p-5">
+        <p className="text-sm text-slate-500">Total zones</p>
+        <p className="mt-2 text-3xl font-bold">
+          {irrigationZones.length}
+        </p>
+      </div>
+
+      <div className="rounded-2xl border border-white/5 bg-white/[0.02] p-5">
+        <p className="text-sm text-slate-500">Simulated active zones</p>
+        <p className="mt-2 text-3xl font-bold text-emerald-400">
+          {irrigationZones.filter((zone) => zone.running).length}
+        </p>
+      </div>
+
+      <div className="rounded-2xl border border-white/5 bg-white/[0.02] p-5">
+        <p className="text-sm text-slate-500">Simulated flow rate</p>
+        <p className="mt-2 text-3xl font-bold">
+          {(
+            irrigationZones.filter((zone) => zone.running).length *
+            irrigationFlowRate
+          ).toFixed(1)}
+          <span className="ml-2 text-sm font-normal text-slate-500">
+            L/min
+          </span>
+        </p>
+      </div>
+
+      <div className="rounded-2xl border border-white/5 bg-white/[0.02] p-5">
+        <p className="text-sm text-slate-500">Simulated water usage</p>
+        <p className="mt-2 text-3xl font-bold">
+          {irrigationZones
+            .reduce((total, zone) => total + zone.litres, 0)
+            .toFixed(2)}
+          <span className="ml-2 text-sm font-normal text-slate-500">
+            L
+          </span>
+        </p>
+      </div>
+    </div>
+
+    {/* Simulation flow configuration */}
+    <div className="rounded-2xl border border-white/5 bg-white/[0.02] p-5">
+      <label
+        htmlFor="simulation-flow-rate"
+        className="block text-sm font-semibold"
+      >
+        Simulation flow rate per active zone
+      </label>
+
+      <div className="mt-3 flex flex-wrap items-center gap-4">
+        <input
+          id="simulation-flow-rate"
+          type="range"
+          min="0.5"
+          max="10"
+          step="0.5"
+          value={irrigationFlowRate}
+          onChange={(event) =>
+            setIrrigationFlowRate(Number(event.target.value))
+          }
+          className="w-full max-w-md accent-emerald-500"
+        />
+
+        <span className="text-sm font-semibold text-emerald-400">
+          {irrigationFlowRate.toFixed(1)} L/min
+        </span>
+      </div>
+
+      <p className="mt-2 text-xs text-slate-500">
+        Demo setting only; this is not a real sensor measurement.
+      </p>
+    </div>
+
+    {/* Zone cards */}
+    <div>
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="text-xl font-bold">Nutrient Supply Pumps</h2>
+          <p className="mt-1 text-sm text-slate-500">
+            Control each nutrient-supply pump independently.
+          </p>
+        </div>
+
+        <button
+          type="button"
+          onClick={stopAllIrrigationZones}
+          className="rounded-xl border border-red-500/20 bg-red-500/5 px-4 py-2.5 text-sm font-semibold text-red-300 hover:bg-red-500/10"
+        >
+          Stop All Simulations
+        </button>
+      </div>
+{/* AI Crop-to-Pump Recommendation */}
+<div className="mb-5 rounded-xl border border-sky-500/20 bg-slate-900/70 p-5">
+  <h3 className="mb-3 text-lg font-semibold text-white">
+    AI Crop-to-Pump Recommendation
+  </h3>
+
+  {recommendationEligible ? (
+    <div className="space-y-3">
+      <p className="text-sm text-slate-300">
+        Detected crop:{" "}
+        <span className="font-semibold text-white">
+          {disease.crop}
+        </span>
+      </p>
+<p className="text-sm text-slate-300">
+  AI confidence:{" "}
+  <span className="font-semibold text-emerald-400">
+    {disease?.confidence != null
+      ? formatConfidence(disease.confidence)
+      : "--"}
+  </span>
+</p>
+
+     <p className="text-sm text-slate-300">
+  Recommended pump:{" "}
+  <span className="font-semibold text-sky-400">
+    {recommendedPump !== null
+      ? `Pump ${recommendedPump}`
+      : "No assigned pump"}
+  </span>
+</p>
+
+<p className="text-sm text-slate-300">
+  Assignment status:{" "}
+  <span
+    className={
+      recommendedPump !== null
+        ? "font-semibold text-emerald-400"
+        : "font-semibold text-amber-300"
+    }
+  >
+    {recommendedPump !== null
+      ? "Pump assigned — review required"
+      : "No pump assigned"}
+  </span>
+</p>
+
+      <p className="text-sm text-amber-300">
+        Review the crop and nutrient selection before taking any action.
+      </p>
+    </div>
+  ) : (
+    <p className="text-sm text-slate-400">
+      Run AI crop analysis to view the crop-to-pump recommendation here.
+    </p>
+  )}
+</div>
+      <div className="grid gap-4 md:grid-cols-2">
+        {irrigationZones.map((zone) => (
+          <div
+            key={zone.id}
+            className="rounded-2xl border border-white/5 bg-white/[0.02] p-5"
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-center gap-3">
+                <div className="rounded-xl bg-emerald-500/10 p-3">
+                  <Droplets className="text-emerald-400" size={22} />
+                </div>
+
+                <div>
+                  <h3 className="font-semibold">{zone.name}</h3>
+			
+{recommendedPump === zone.id && (
+  <span className="mt-1 inline-flex rounded-full border border-sky-500/20 bg-sky-500/10 px-2 py-1 text-xs font-medium text-sky-300">
+    Crop match — review required
+  </span>
+)}
+
+                  <p className="mt-1 text-sm text-slate-500">
+                    Crop: {zone.crop}
+                  </p>
+                </div>
+              </div>
+
+              <span
+                className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                  zone.running
+                    ? "bg-emerald-500/10 text-emerald-400"
+                    : "bg-slate-500/10 text-slate-400"
+                }`}
+              >
+                {zone.running ? "SIMULATING" : "STOPPED"}
+              </span>
+            </div>
+
+            <div className="mt-6 grid grid-cols-2 gap-3">
+              <div className="rounded-xl border border-white/5 bg-black/10 p-3">
+                <p className="text-xs text-slate-500">Flow rate</p>
+                <p className="mt-2 font-semibold">
+                  {zone.running ? irrigationFlowRate.toFixed(1) : "0.0"} L/min
+                </p>
+              </div>
+
+              <div className="rounded-xl border border-white/5 bg-black/10 p-3">
+                <p className="text-xs text-slate-500">Water used</p>
+                <p className="mt-2 font-semibold">
+                  {zone.litres.toFixed(2)} L
+                </p>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => toggleIrrigationZone(zone.id)}
+              className={`mt-5 flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-bold transition ${
+                zone.running
+                  ? "border border-red-500/20 bg-red-500/5 text-red-300 hover:bg-red-500/10"
+                  : "bg-emerald-500 text-[#06100c] hover:bg-emerald-400"
+              }`}
+            >
+              {zone.running ? "Stop Simulation" : "Start Simulation"}
+            </button>
+          </div>
+        ))}
+      </div>
+    </div>
+  </motion.section>
+)}
+
+
 
           {/* ==================================================
               EMPTY STATE
@@ -1819,7 +2261,153 @@ export default function App() {
 
             </div>
 
-          </footer>
+                   </footer>
+          </>
+          )}
+
+          {/* TREATMENTS PAGE */}
+          {activePage === "Treatments" && (
+            <section className="mt-6 space-y-6">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-widest text-emerald-400">
+                  Treatment information
+                </p>
+                <h2 className="mt-2 text-2xl font-bold">
+                  Treatments
+                </h2>
+                <p className="mt-2 text-sm text-slate-400">
+                  Read-only recommendations from the latest AI analysis.
+                </p>
+              </div>
+
+              <div className="rounded-2xl border border-white/5 bg-white/[0.02] p-5">
+                <h3 className="font-semibold">Latest treatment recommendation</h3>
+                {treatment?.available ? (
+                  <div className="mt-4 space-y-2 text-sm text-slate-300">
+                    <p>Product: <strong>{treatment.product || "Not specified"}</strong></p>
+                    <p>Configured bottle: <strong>{treatment.bottle ?? "Not specified"}</strong></p>
+                    <p>Recommended amount: <strong>{treatment.amount_ml ?? "Not specified"} mL</strong></p>
+                  </div>
+                ) : (
+                  <p className="mt-3 text-sm text-slate-400">
+                    No validated treatment recommendation is currently available.
+                    Run an AI analysis to view a recommendation, if supported.
+                  </p>
+                )}
+                <p className="mt-4 text-xs text-amber-300">
+                  Information only. This page does not dispense liquids or control pumps.
+                </p>
+              </div>
+            </section>
+          )}
+
+          {/* NOTIFICATIONS PAGE */}
+          {activePage === "Notifications" && (
+            <section className="mt-6 space-y-6">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-widest text-emerald-400">
+                  System alerts
+                </p>
+                <h2 className="mt-2 text-2xl font-bold">Notifications</h2>
+              </div>
+
+              <div className="rounded-2xl border border-white/5 bg-white/[0.02] p-5">
+                <div className="flex items-center gap-3">
+                  <Wifi size={20} className={brokerConnected ? "text-emerald-400" : "text-amber-400"} />
+                  <div>
+                    <p className="font-semibold">MQTT Broker</p>
+                    <p className="text-sm text-slate-400">
+                      {brokerConnected ? "Connected" : "Disconnected"}
+                    </p>
+                  </div>
+                </div>
+                <div className="mt-5 flex items-center gap-3">
+                  <Cpu size={20} className={deviceStatus === "ONLINE" ? "text-emerald-400" : "text-amber-400"} />
+                  <div>
+                    <p className="font-semibold">ESP32 Controller</p>
+                    <p className="text-sm text-slate-400">
+                      {deviceStatus === "ONLINE" ? "Backend reports device online" : `Device status: ${deviceStatus || "UNKNOWN"}`}
+                    </p>
+                  </div>
+                </div>
+                <p className="mt-5 text-xs text-slate-500">
+                  These are current status indicators, not a stored alert history.
+                </p>
+              </div>
+            </section>
+          )}
+
+          {/* SETTINGS PAGE */}
+          {activePage === "Settings" && (
+            <section className="mt-6 space-y-6">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-widest text-emerald-400">
+                  Configuration overview
+                </p>
+                <h2 className="mt-2 text-2xl font-bold">Settings</h2>
+                <p className="mt-2 text-sm text-slate-400">
+                  Current reported settings. This page does not change device configuration.
+                </p>
+              </div>
+
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div className="rounded-2xl border border-white/5 bg-white/[0.02] p-5">
+                  <p className="text-sm text-slate-400">Device ID</p>
+                  <p className="mt-2 font-semibold">{DEVICE_ID}</p>
+                </div>
+                <div className="rounded-2xl border border-white/5 bg-white/[0.02] p-5">
+                  <p className="text-sm text-slate-400">MQTT Broker</p>
+                  <p className="mt-2 font-semibold">
+                    {brokerConnected ? "Connected" : "Disconnected"}
+                  </p>
+                </div>
+                <div className="rounded-2xl border border-white/5 bg-white/[0.02] p-5">
+                  <p className="text-sm text-slate-400">Relay outputs</p>
+                  <p className="mt-2 font-semibold text-amber-300">
+                    {relayOutputsEnabled ? "Reported enabled — verify safety" : "Disabled or not confirmed enabled"}
+                  </p>
+                </div>
+                <div className="rounded-2xl border border-white/5 bg-white/[0.02] p-5">
+                  <p className="text-sm text-slate-400">Hardware control</p>
+                  <p className="mt-2 font-semibold">Monitoring only</p>
+                </div>
+              </div>
+            </section>
+          )}
+
+          {/* HELP PAGE */}
+          {activePage === "Help" && (
+            <section className="mt-6 space-y-6">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-widest text-emerald-400">
+                  Project guide
+                </p>
+                <h2 className="mt-2 text-2xl font-bold">Help & Safety</h2>
+              </div>
+
+              <div className="space-y-4 rounded-2xl border border-white/5 bg-white/[0.02] p-5">
+                <div>
+                  <h3 className="font-semibold">Device monitoring</h3>
+                  <p className="mt-1 text-sm text-slate-400">
+                    Devices shows ESP32 and MQTT status, reported flow, uptime, and the last update.
+                  </p>
+                </div>
+                <div>
+                  <h3 className="font-semibold">Analytics</h3>
+                  <p className="mt-1 text-sm text-slate-400">
+                    Analytics charts distinct reported flow readings collected while the page is active.
+                  </p>
+                </div>
+                <div>
+                  <h3 className="font-semibold">Hardware safety</h3>
+                  <p className="mt-1 text-sm text-amber-300">
+                    Keep ENABLE_RELAY_OUTPUTS=false and physical pumps disconnected during software testing.
+                    AI recommendations must not automatically start dispensing.
+                  </p>
+                </div>
+              </div>
+            </section>
+          )}
 
         </div>
 
